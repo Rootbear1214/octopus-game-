@@ -8,6 +8,7 @@
 
   const uiLight = document.getElementById('lightStatus');
   const uiRound = document.getElementById('roundStatus');
+  const uiTimer = document.getElementById('timer');
 
   // Visual + world constants
   const MARGIN = 28;
@@ -23,13 +24,15 @@
   const DEAD_COLOR = '#555';
 
   const HUMAN_SPEED = 150; // px/s
-  const AI_BASE_SPEED_MIN = 120;
-  const AI_BASE_SPEED_MAX = 170;
+  const AI_BASE_SPEED_MIN = 110;
+  const AI_BASE_SPEED_MAX = 160;
 
   const RED_GREEN_MIN = 2.0; // seconds
   const RED_GREEN_MAX = 5.0; // seconds
   const MOVE_EPS = 0.35; // pixels, anything above while red is a shot
   const WARNING_MS = 900; // pre-red warning duration
+  const PANICKER_DEATH_THRESHOLD = 5; // after this many AIs die, panickers are removed
+  const GAME_DURATION_MS = 25 * 1000; // 25 second game timer
 
   const field = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
 
@@ -68,6 +71,10 @@
   let warnAt = nextSwitchAt - WARNING_MS; // only used when currently green
   let redStartAt = 0;
   let panicTriggered = false; // set after the first shot
+  let panickersCulled = false; // true once we kill the panic group
+  let gameStartAt = performance.now();
+  let timeRemainingMs = GAME_DURATION_MS;
+  let timeUpTriggered = false; // mass elimination already executed
 
   function toggleLight() {
     isGreen = !isGreen;
@@ -111,7 +118,7 @@
   }, { passive: false });
 
   // Players
-  /** @typedef {{id:number,x:number,y:number,px:number,py:number, r:number, color:string, outline?:string, vx:number, vy:number, speed:number, alive:boolean, finished:boolean, isAI:boolean, isMoving:boolean, reactionDelay:number, mistakeRate:number, sideBias:number, willTwitchThisRed:boolean, twitchedThisRed:boolean, redForgivenUntil:number, isPanicRunner:boolean, immuneToRed:boolean, panicDirX:number, panicDirY:number, panicDirUntil:number}} Player */
+  /** @typedef {{id:number,x:number,y:number,px:number,py:number, r:number, color:string, outline?:string, vx:number, vy:number, speed:number, alive:boolean, finished:boolean, isAI:boolean, isMoving:boolean, reactionDelay:number, mistakeRate:number, sideBias:number, willTwitchThisRed:boolean, twitchedThisRed:boolean, redForgivenUntil:number, isPanicRunner:boolean, immuneToRed:boolean, panicDirX:number, panicDirY:number, panicDirUntil:number, bloodDots:any[]}} Player */
   /** @type {Player[]} */
   const players = [];
 
@@ -171,6 +178,7 @@
       panicDirX: 0,
       panicDirY: 0,
       panicDirUntil: 0,
+      bloodDots: [],
     };
   }
 
@@ -280,16 +288,18 @@
     }
   }
 
-  function markShot(p) {
+  function markShot(p, opts = {}) {
     if (!p.alive || p.finished) return;
     p.alive = false;
     p.isMoving = false;
     p.deathAt = performance.now();
     // Store last position for rendering effect
     p.px = p.x; p.py = p.y;
+    // Generate random red dot pattern for this corpse
+    p.bloodDots = makeBloodDots(p);
 
     // Trigger panic group once on first death
-    if (!panicTriggered) {
+    if (!panicTriggered && !opts.suppressPanic) {
       panicTriggered = true;
       const candidates = players.filter(q => q.alive && !q.finished && q.isAI && q !== p);
       // Choose a small group
@@ -368,6 +378,19 @@
       // Store last position for next frame check
       p.px = p.x; p.py = p.y;
     }
+
+    // If enough AIs have died, eliminate panic runners
+    if (panicTriggered && !panickersCulled) {
+      const deadAI = players.reduce((acc, q) => acc + ((q.isAI && !q.alive) ? 1 : 0), 0);
+      if (deadAI >= PANICKER_DEATH_THRESHOLD) {
+        for (const q of players) {
+          if (q.isPanicRunner && q.alive) {
+            markShot(q);
+          }
+        }
+        panickersCulled = true;
+      }
+    }
   }
 
   function draw() {
@@ -434,17 +457,15 @@
         ctx.stroke();
       }
       if (!p.alive) {
-        // draw a red X to indicate shot
+        // draw random-position small red dots generated at death
         ctx.save();
-        ctx.strokeStyle = '#e53935';
-        ctx.lineWidth = 2.2;
-        const s = p.r + 4;
-        ctx.beginPath();
-        ctx.moveTo(p.x - s, p.y - s);
-        ctx.lineTo(p.x + s, p.y + s);
-        ctx.moveTo(p.x + s, p.y - s);
-        ctx.lineTo(p.x - s, p.y + s);
-        ctx.stroke();
+        ctx.fillStyle = '#e53935';
+        const dots = p.bloodDots || [];
+        for (const d of dots) {
+          ctx.beginPath();
+          ctx.arc(p.x + d.dx, p.y + d.dy, d.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
         ctx.restore();
       }
     }
@@ -464,12 +485,40 @@
   }
 
   function randRange(min, max) { return min + Math.random() * (max - min); }
+  function shuffleInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr;
+  }
+  function makeBloodDots(p) {
+    const dots = [];
+    const count = Math.floor(randRange(4, 9));
+    for (let i = 0; i < count; i++) {
+      const theta = Math.random() * Math.PI * 2;
+      const dist = p.r * randRange(0.1, 0.7);
+      const dx = Math.cos(theta) * dist;
+      const dy = Math.sin(theta) * dist;
+      const r = Math.max(1.2, p.r * randRange(0.16, 0.3));
+      dots.push({ dx, dy, r });
+    }
+    return dots;
+  }
 
   function updateUILight() {
     uiLight.textContent = `Light: ${isWarning ? 'WARNING' : (isGreen ? 'GREEN' : 'RED')}`;
     const alive = players.filter(p => p.alive).length;
     const finished = players.filter(p => p.finished).length;
     uiRound.textContent = `Players Alive: ${alive} | Finished: ${finished}`;
+  }
+  function updateUITimer() {
+    const total = Math.ceil(timeRemainingMs / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    if (uiTimer) uiTimer.textContent = `Time: ${m}:${s.toString().padStart(2, '0')}`;
   }
 
   let lastTime = performance.now();
@@ -484,6 +533,17 @@
       isWarning = true;
     }
 
+    // Update countdown and handle time-up mass elimination once
+    timeRemainingMs = Math.max(0, GAME_DURATION_MS - (now - gameStartAt));
+    if (timeRemainingMs === 0 && !timeUpTriggered) {
+      for (const p of players) {
+        if (p.alive && !p.finished) {
+          markShot(p, { suppressPanic: true });
+        }
+      }
+      timeUpTriggered = true;
+    }
+
     // Update players
     for (const p of players) p.isMoving = false;
 
@@ -496,6 +556,7 @@
 
     postMoveCollisionAndRules(now);
     updateUILight();
+    updateUITimer();
     draw();
 
     lastTime = now;

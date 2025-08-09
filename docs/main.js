@@ -34,6 +34,12 @@
   const PANICKER_DEATH_THRESHOLD = 5; // after this many AIs die, panickers are removed
   const GAME_DURATION_MS = 25 * 1000; // 25 second game timer
 
+  // Push ability constants
+  const PUSH_RADIUS = 100;      // pixels
+  const PUSH_STRENGTH = 42;    // pixels of knockback at center, falls off to edge
+  const PUSH_COOLDOWN_MS = 90;// ms between uses
+  const PUSH_FX_MS = 250;      // ring visible duration
+
   const field = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
 
   function resizeCanvas() {
@@ -108,14 +114,33 @@
     if (['KeyW','KeyA','KeyS','KeyD'].includes(e.code)) {
       keys.add(e.code);
       e.preventDefault();
+    } else if (e.code === 'Digit1') {
+      triggerPush();
+      e.preventDefault();
     }
   }, { passive: false });
   window.addEventListener('keyup', (e) => {
     if (['KeyW','KeyA','KeyS','KeyD'].includes(e.code)) {
       keys.delete(e.code);
-      e.preventDefault();
     }
-  }, { passive: false });
+  });
+
+  // Push ability state and trigger
+  let pushQueued = false;
+  let pushCenterX = 0, pushCenterY = 0;
+  let pushFxUntil = 0;
+  function triggerPush() {
+    const human = players[HUMAN_INDEX];
+    if (!human || !human.alive || human.finished) return;
+    const now = performance.now();
+    if (typeof human.lastPushAt !== 'number') human.lastPushAt = -Infinity;
+    if (now - human.lastPushAt < PUSH_COOLDOWN_MS) return;
+    human.lastPushAt = now;
+    pushQueued = true;
+    pushCenterX = human.x;
+    pushCenterY = human.y;
+    pushFxUntil = now + PUSH_FX_MS;
+  }
 
   // Players
   /** @typedef {{id:number,x:number,y:number,px:number,py:number, r:number, color:string, outline?:string, vx:number, vy:number, speed:number, alive:boolean, finished:boolean, isAI:boolean, isMoving:boolean, reactionDelay:number, mistakeRate:number, sideBias:number, willTwitchThisRed:boolean, twitchedThisRed:boolean, redForgivenUntil:number, isPanicRunner:boolean, immuneToRed:boolean, panicDirX:number, panicDirY:number, panicDirUntil:number, bloodDots:any[]}} Player */
@@ -328,6 +353,36 @@
       clampToField(p);
     }
 
+    // Apply queued push pulse (knockback)
+    if (pushQueued) {
+      const cx = pushCenterX, cy = pushCenterY;
+      const human = players[HUMAN_INDEX];
+      for (const q of players) {
+        if (!q.alive || q.finished) continue;
+        // Do not push the center initiator significantly
+        const dx = q.x - cx;
+        const dy = q.y - cy;
+        const dist = Math.hypot(dx, dy) || 0.0001;
+        const maxDist = PUSH_RADIUS + q.r;
+        if (dist < maxDist) {
+          // Direction from center to player
+          let nx = dx / dist, ny = dy / dist;
+          if (!isFinite(nx) || !isFinite(ny)) { nx = 1; ny = 0; }
+          const t = Math.max(0, 1 - dist / maxDist);
+          const amt = t * PUSH_STRENGTH;
+          q.x += nx * amt;
+          q.y += ny * amt;
+          clampToField(q);
+          q.isMoving = true; // for collision resolution weighting
+          // During red light, pushed players are eliminated (unless immune/panicker)
+          if (!isGreen && q !== human && !q.immuneToRed) {
+            markShot(q);
+          }
+        }
+      }
+      pushQueued = false;
+    }
+
     // Separate overlaps. Prefer moving players to be displaced.
     for (let iter = 0; iter < 2; iter++) {
       for (let i = 0; i < players.length; i++) {
@@ -468,6 +523,17 @@
         }
         ctx.restore();
       }
+    }
+
+    // Push radius visual effect
+    if (performance.now() < pushFxUntil) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(pushCenterX, pushCenterY, PUSH_RADIUS, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
